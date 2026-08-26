@@ -254,5 +254,10 @@ jobs:
             --add-cloudsql-instances=${{ steps.secret.outputs.DB_INSTANCE_CONNECTION_NAME }} \
             --clear-vpc-connector
 
-      - name: 'Limpando Artifact'
-        run: ./google.sh ${{ steps.env.outputs.project_id }} ${{ env.nomeDaFuncao }} us-central1
+      - name: 'Limpando Artifact (mantém a imagem atual)'
+        uses: actions/checkout@v4
+        with:
+          repository: my-build-ead/mybuilder-deploy
+          path: .mybuilder-deploy
+      - name: 'Limpar versões antigas'
+        run: bash .mybuilder-deploy/scripts/cleanup-artifacts.sh ${{ steps.env.outputs.project_id }} ${{ env.nomeDaFuncao }} us-central1
