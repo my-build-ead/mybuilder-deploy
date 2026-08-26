@@ -170,7 +170,7 @@ jobs:
           contents: |
             DATABASE_URL: "${{ env.DATABASE_URL_SOCKET }}"
             DB_IDLE_TIMEOUT: "${{ inputs.dbIdleTimeout }}"
-            DB_MIN_IDLE: "0"
+            DB_MIN_IDLE: "1"
             DOMAIN: "${{ steps.secret.outputs.DOMAIN }}/${{env.nomeDaFuncao}}"
             DOMAIN_FUNCTIONS: "${{ steps.secret.outputs.DOMAIN }}"
             FUNCTION: ${{env.nomeDaFuncao}}

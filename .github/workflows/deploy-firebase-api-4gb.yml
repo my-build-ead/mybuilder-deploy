@@ -141,7 +141,7 @@ jobs:
           contents: |
             DATABASE_URL: "mysql://${{ steps.secret.outputs.DB_MYSQL_STRING }}/${{env.projeto}}_${{env.ENV_DB}}${{ inputs.bancoSuffix }}?connection_limit=${{ inputs.dbConnLimit }}"
             DB_IDLE_TIMEOUT: "${{ inputs.dbIdleTimeout }}"
-            DB_MIN_IDLE: "0"
+            DB_MIN_IDLE: "1"
             DOMAIN: "${{ steps.secret.outputs.DOMAIN }}/${{env.nomeDaFuncao}}"
             DOMAIN_FUNCTIONS: "${{ steps.secret.outputs.DOMAIN }}"
             FUNCTION: ${{env.nomeDaFuncao}}
