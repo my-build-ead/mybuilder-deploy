@@ -3,6 +3,16 @@ name: Reusable - Deploy Cloud Function (with REDIS)
 on:
   workflow_call:
     inputs:
+      # Pool de DB por instancia: conexoes e segundos ate fechar ociosa.
+      # APIs que geram arquivo/relatorio podem subir esses valores.
+      dbConnLimit:
+        required: false
+        type: string
+        default: "2"
+      dbIdleTimeout:
+        required: false
+        type: string
+        default: "60"
       nomeDaFuncao:
         required: true
         type: string
@@ -130,7 +140,7 @@ jobs:
           # que não depende do timing do Direct VPC Egress no cold start.
           CREDS="${DB_MYSQL_STRING%@*}"
           DBNAME="${projeto}_${ENV_DB}${BANCO_SUFFIX}"
-          echo "DATABASE_URL_SOCKET=mysql://${CREDS}@localhost/${DBNAME}?socket=/cloudsql/${CONN}&connection_limit=5" >> "$GITHUB_ENV"
+          echo "DATABASE_URL_SOCKET=mysql://${CREDS}@localhost/${DBNAME}?socket=/cloudsql/${CONN}&connection_limit=${{ inputs.dbConnLimit }}" >> "$GITHUB_ENV"
         env:
           DB_MYSQL_STRING: ${{ steps.secret.outputs.DB_MYSQL_STRING }}
           CONN: ${{ steps.secret.outputs.DB_INSTANCE_CONNECTION_NAME }}
@@ -144,6 +154,8 @@ jobs:
           write-mode: overwrite
           contents: |
             DATABASE_URL: "${{ env.DATABASE_URL_SOCKET }}"
+            DB_IDLE_TIMEOUT: "${{ inputs.dbIdleTimeout }}"
+            DB_MIN_IDLE: "0"
             DOMAIN: "${{ steps.secret.outputs.DOMAIN }}/${{env.nomeDaFuncao}}"
             DOMAIN_FUNCTIONS: "${{ steps.secret.outputs.DOMAIN }}"
             FUNCTION: ${{env.nomeDaFuncao}}
