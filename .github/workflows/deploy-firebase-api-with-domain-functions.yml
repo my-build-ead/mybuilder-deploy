@@ -26,7 +26,8 @@ on:
       cpu:
         required: false
         type: string
-        default: ""
+        # piso de 1 vCPU aplicado no step de deploy; valores maiores passam
+        default: "1"
       concurrency:
         required: false
         type: string
@@ -238,7 +239,22 @@ jobs:
       - name: 'Deploy na function'
         run: |
           EXTRA_FLAGS=""
-          if [ -n "${{ inputs.cpu }}" ]; then EXTRA_FLAGS="$EXTRA_FLAGS --cpu=${{ inputs.cpu }}"; fi
+          # Piso de 1 vCPU. O default do gen2 (0,5833) fazia o cold start
+          # estourar o pluginTimeout do Fastify; a rejeicao virava
+          # unhandledRejection, o functions-framework matava a instancia
+          # (exit 16) e o browser via "erro de CORS" no lugar do 500 real.
+          # Valores ACIMA de 1 informados pelo chamador sao preservados.
+          CPU="${{ inputs.cpu }}"
+          [ -z "$CPU" ] && CPU="1"
+          CPU_CORES="${CPU%m}"
+          case "$CPU" in
+            *m) CPU_CORES=$(awk -v v="$CPU_CORES" 'BEGIN{printf "%.4f", v/1000}') ;;
+          esac
+          if awk -v v="$CPU_CORES" 'BEGIN{exit !(v < 1)}'; then
+            echo "cpu=$CPU esta abaixo do piso de 1 vCPU; usando 1"
+            CPU="1"
+          fi
+          EXTRA_FLAGS="$EXTRA_FLAGS --cpu=$CPU"
           if [ -n "${{ inputs.concurrency }}" ]; then EXTRA_FLAGS="$EXTRA_FLAGS --concurrency=${{ inputs.concurrency }}"; fi
           gcloud functions deploy ${nomeDaFuncao} --gen2 --region=us-central1 --runtime nodejs22 --memory=1Gi --entry-point ${nomeDaFuncao} --trigger-http --allow-unauthenticated --env-vars-file env.yaml --project=${{ steps.env.outputs.project_id }} --min-instances=0 --max-instances=${{ inputs.maxInstances }} $EXTRA_FLAGS
 
