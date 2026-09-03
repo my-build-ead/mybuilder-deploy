@@ -40,6 +40,14 @@ on:
         required: false
         type: boolean
         default: false
+      # Autenticacao entre APIs (ex: v2_payments -> v1_atendimento/emailsend):
+      # le <ENV>INTERNAL_API_SECRET, <ENV>INTERNAL_AUTH_MODE e
+      # <ENV>SERVICE_USER_EMAIL do Secret Manager e injeta no env.yaml.
+      # Opcional: functions que nao participam nao precisam ter os segredos.
+      withInternalSecret:
+        required: false
+        type: boolean
+        default: false
     secrets:
       FIREBASE_DEV:
         required: false
@@ -146,6 +154,16 @@ jobs:
             RECAPTCHA_SITE_KEY:${{ steps.env.outputs.project_id }}/${{ env.ENV }}RECAPTCHA_SITE_KEY
             RECAPTCHA_MIN_SCORE:${{ steps.env.outputs.project_id }}/${{ env.ENV }}RECAPTCHA_MIN_SCORE
 
+      - name: Acessar secrets de autenticacao entre APIs (opcional)
+        id: internal_secret
+        if: ${{ inputs.withInternalSecret }}
+        uses: 'google-github-actions/get-secretmanager-secrets@v2'
+        with:
+          secrets: |-
+            INTERNAL_API_SECRET:${{ steps.env.outputs.project_id }}/${{ env.ENV }}INTERNAL_API_SECRET
+            INTERNAL_AUTH_MODE:${{ steps.env.outputs.project_id }}/${{ env.ENV }}INTERNAL_AUTH_MODE
+            SERVICE_USER_EMAIL:${{ steps.env.outputs.project_id }}/${{ env.ENV }}SERVICE_USER_EMAIL
+
       - name: Montar DATABASE_URL via socket do Cloud SQL
         run: |
           # Remove "@host" da credencial (fica user:pass) para conectar via socket,
@@ -194,6 +212,17 @@ jobs:
           RECAPTCHA_ENABLED: "${{ steps.recaptcha_secret.outputs.RECAPTCHA_ENABLED }}"
           RECAPTCHA_SITE_KEY: "${{ steps.recaptcha_secret.outputs.RECAPTCHA_SITE_KEY }}"
           RECAPTCHA_MIN_SCORE: "${{ steps.recaptcha_secret.outputs.RECAPTCHA_MIN_SCORE }}"
+          EOF
+
+      - name: Append autenticacao entre APIs no env.yaml (opcional)
+        if: ${{ inputs.withInternalSecret }}
+        run: |
+          # mesmo guard de newline do step do reCAPTCHA
+          if [ -s ./env.yaml ] && [ -n "$(tail -c 1 ./env.yaml)" ]; then echo >> ./env.yaml; fi
+          cat >> ./env.yaml <<EOF
+          INTERNAL_API_SECRET: "${{ steps.internal_secret.outputs.INTERNAL_API_SECRET }}"
+          INTERNAL_AUTH_MODE: "${{ steps.internal_secret.outputs.INTERNAL_AUTH_MODE }}"
+          SERVICE_USER_EMAIL: "${{ steps.internal_secret.outputs.SERVICE_USER_EMAIL }}"
           EOF
 
       - name: Write file firebase account DEV
