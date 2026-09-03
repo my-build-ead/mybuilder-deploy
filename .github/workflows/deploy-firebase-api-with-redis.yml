@@ -36,6 +36,14 @@ on:
         required: false
         type: string
         default: "3"
+      # Nomes de secrets adicionais (separados por espaço) buscados no Secret
+      # Manager com o prefixo do ambiente (ex: INTERNAL_API_SECRET ->
+      # DEV_INTERNAL_API_SECRET no dev). Busca tolerante: secret ausente vira
+      # warning, não quebra o deploy de APIs que não usam essas variáveis.
+      extraSecrets:
+        required: false
+        type: string
+        default: ""
     secrets:
       FIREBASE_DEV:
         required: false
@@ -173,6 +181,22 @@ jobs:
             RECAPTCHA_MIN_SCORE: "${{ steps.secret.outputs.RECAPTCHA_MIN_SCORE }}"
             REDIS: |-
               ${{ steps.secret.outputs.REDIS }}
+
+      - name: Anexar secrets extras ao env.yaml (opcional)
+        if: inputs.extraSecrets != ''
+        run: |
+          # o write-file-action nao termina o arquivo com newline — sem isso o
+          # append colaria na ultima linha e quebraria o YAML
+          if [ -s env.yaml ] && [ -n "$(tail -c 1 env.yaml)" ]; then echo >> env.yaml; fi
+          for NAME in ${{ inputs.extraSecrets }}; do
+            VALUE=$(gcloud secrets versions access latest --secret="${ENV}${NAME}" --project=${{ steps.env.outputs.project_id }} 2>/dev/null || true)
+            if [ -n "$VALUE" ]; then
+              ESCAPED=$(printf '%s' "$VALUE" | sed 's/\\/\\\\/g; s/"/\\"/g')
+              printf '%s: "%s"\n' "$NAME" "$ESCAPED" >> env.yaml
+            else
+              echo "::warning::Secret ${ENV}${NAME} nao encontrado no Secret Manager — variavel $NAME nao sera definida"
+            fi
+          done
 
       - name: Write file firebase account DEV
         if: github.ref_name == 'dev'
