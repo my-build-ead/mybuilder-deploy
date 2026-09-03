@@ -214,6 +214,10 @@ jobs:
             APPID: "${{ steps.secret.outputs.APPID }}"
             MEASUREMENTID: "${{ steps.secret.outputs.MEASUREMENTID }}"
             HTTP: https
+            # Functions Framework: anexa o executionId da requisição a cada linha de
+            # log (inclusive console.*) — com concurrency > 1, separa no Cloud
+            # Logging as linhas de requisições intercaladas na mesma instância.
+            LOG_EXECUTION_ID: "true"
             REDIS: |-
               ${{ steps.secret.outputs.REDIS }}
 

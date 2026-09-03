@@ -186,6 +186,10 @@ jobs:
             MEASUREMENTID: "${{ steps.secret.outputs.MEASUREMENTID }}"
             SITEID: '${{ steps.secret.outputs.SITEID }}'
             HTTP: https
+            # Functions Framework: anexa o executionId da requisição a cada linha de
+            # log (inclusive console.*) — com concurrency > 1, separa no Cloud
+            # Logging as linhas de requisições intercaladas na mesma instância.
+            LOG_EXECUTION_ID: "true"
             RECAPTCHA_ENABLED: "${{ steps.secret.outputs.RECAPTCHA_ENABLED }}"
             RECAPTCHA_SITE_KEY: "${{ steps.secret.outputs.RECAPTCHA_SITE_KEY }}"
             RECAPTCHA_MIN_SCORE: "${{ steps.secret.outputs.RECAPTCHA_MIN_SCORE }}"
