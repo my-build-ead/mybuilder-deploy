@@ -44,6 +44,15 @@ on:
         required: false
         type: string
         default: ""
+      # Nomes de Cloud Scheduler jobs (separados por espaço) que chamam rotas
+      # desta function protegidas por x-internal-secret. Após o deploy, o
+      # header é (re)aplicado com o valor de <ENV>INTERNAL_API_SECRET. Jobs que
+      # não existem no ambiente são ignorados com warning (os nomes variam por
+      # ambiente, ex.: "revista revistas").
+      schedulerJobs:
+        required: false
+        type: string
+        default: ""
     secrets:
       FIREBASE_DEV:
         required: false
@@ -245,6 +254,27 @@ jobs:
           EXTRA_FLAGS="$EXTRA_FLAGS --cpu=$CPU"
           if [ -n "${{ inputs.concurrency }}" ]; then EXTRA_FLAGS="$EXTRA_FLAGS --concurrency=${{ inputs.concurrency }}"; fi
           gcloud functions deploy ${nomeDaFuncao} --gen2 --region=us-central1 --runtime nodejs22 --memory=4Gi --entry-point ${nomeDaFuncao} --trigger-http --allow-unauthenticated --env-vars-file env.yaml --project=${{ steps.env.outputs.project_id }} --min-instances=0 --max-instances=${{ inputs.maxInstances }} $EXTRA_FLAGS
+
+      - name: "Aplicar x-internal-secret nos Cloud Scheduler jobs (opcional)"
+        if: inputs.schedulerJobs != ''
+        run: |
+          SECRET=$(gcloud secrets versions access latest --secret="${ENV}INTERNAL_API_SECRET" --project=${{ steps.env.outputs.project_id }} 2>/dev/null || true)
+          if [ -z "$SECRET" ]; then
+            echo "::warning::Secret ${ENV}INTERNAL_API_SECRET nao encontrado — schedulers nao atualizados"
+            exit 0
+          fi
+          for JOB in ${{ inputs.schedulerJobs }}; do
+            if gcloud scheduler jobs describe "$JOB" --location=us-central1 --project=${{ steps.env.outputs.project_id }} >/dev/null 2>&1; then
+              gcloud scheduler jobs update http "$JOB" \
+                --location=us-central1 \
+                --project=${{ steps.env.outputs.project_id }} \
+                --update-headers="x-internal-secret=${SECRET}" \
+                --quiet
+              echo "scheduler $JOB: header x-internal-secret aplicado"
+            else
+              echo "::warning::Cloud Scheduler job $JOB nao existe em ${{ steps.env.outputs.project_id }} — ignorado"
+            fi
+          done
 
       - name: 'Configurar Direct VPC Egress no Cloud Run subjacente'
         run: |
