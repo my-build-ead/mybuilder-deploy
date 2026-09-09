@@ -364,3 +364,7 @@ jobs:
           path: .mybuilder-deploy
       - name: 'Limpar versões antigas'
         run: bash .mybuilder-deploy/scripts/cleanup-artifacts.sh ${{ steps.env.outputs.project_id }} ${{ env.nomeDaFuncao }} us-central1
+      # Revisões do Cloud Run também acumulavam (só as imagens eram limpas):
+      # mantém as 3 mais novas, nunca a que serve tráfego.
+      - name: 'Limpar revisões antigas do Cloud Run (mantém 3)'
+        run: bash .mybuilder-deploy/scripts/cleanup-revisions.sh ${{ steps.env.outputs.project_id }} ${{ env.nomeDaFuncao }} us-central1 3
