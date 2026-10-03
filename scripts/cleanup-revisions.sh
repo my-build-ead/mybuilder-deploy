@@ -28,6 +28,14 @@ SERVICE="${FUNCTION_NAME//_/-}"
 
 echo "🧹 Revisões de '$SERVICE' ($PROJECT_ID/$REGION) — mantendo as $KEEP mais novas"
 
+# O python3 decide as revisões protegidas. No macOS (runner self-hosted) o
+# /usr/bin/python3 só funciona com as Command Line Tools instaladas; sem ele,
+# pula a limpeza com aviso em vez de marcar como falho um deploy que já deu certo.
+if ! python3 -c 'import json' >/dev/null 2>&1; then
+  echo "::warning::python3 indisponível no runner ($(uname -s)) — limpeza de revisões pulada."
+  exit 0
+fi
+
 SERVICE_JSON=$(gcloud run services describe "$SERVICE" --region="$REGION" --project="$PROJECT_ID" --format=json 2>/dev/null || true)
 if [ -z "$SERVICE_JSON" ]; then
   echo "  🚫 Serviço inexistente — nada a fazer."
