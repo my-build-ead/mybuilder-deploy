@@ -38,3 +38,36 @@ APIs que geram arquivo/relatório e precisem de mais folga sobem os inputs no
 > **Atenção:** para os repos da org usarem estes workflows, em
 > Settings → Actions → General → Access deste repo deve estar
 > "Accessible from repositories owned by the organization".
+
+## Runner self-hosted (Mac mini `mac03`)
+
+Todos os workflows têm um job `probe` (ubuntu-latest, segundos) que consulta a
+API de runners da org `my-build-ead` e decide onde o `build_and_deploy` roda:
+
+- alguma instância `macOS` online e **livre** → `[self-hosted, macOS, ARM64]`;
+- todas online mas **ocupadas** → `ubuntu-latest` na hora (não espera fila);
+- nenhuma online → espera até 2 min o mini aparecer, depois `ubuntu-latest`.
+
+Requisitos:
+
+- secret `RUNNERS_READ_TOKEN` na org: PAT fine-grained com resource owner
+  `my-build-ead` e permissão de organização **Self-hosted runners: Read-only**.
+  O caller repassa junto com os `FIREBASE_*`:
+
+  ```yaml
+      secrets:
+        FIREBASE_DEV: ${{ secrets.FIREBASE_DEV }}
+        FIREBASE_QA: ${{ secrets.FIREBASE_QA }}
+        FIREBASE_SANDBOX: ${{ secrets.FIREBASE_SANDBOX }}
+        FIREBASE: ${{ secrets.FIREBASE }}
+        RUNNERS_READ_TOKEN: ${{ secrets.RUNNERS_READ_TOKEN }}
+  ```
+
+  (com `secrets: inherit` vai automaticamente). Sem o secret tudo roda no
+  GitHub, com warning na sonda — nunca quebra o deploy;
+- o Mac mini não precisa de gcloud instalado: o `setup-gcloud` baixa o SDK
+  para o tool cache do runner (só o primeiro run paga o download);
+- os scripts em `scripts/` são bash 3.2/BSD-compatíveis (macOS); o `sed -i`
+  nos workflows usa sufixo `.bak` pelo mesmo motivo;
+- `env.yaml` e `firebase.json` são apagados ao final no self-hosted, já que o
+  workspace persiste entre runs.

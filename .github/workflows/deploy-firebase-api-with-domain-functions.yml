@@ -74,6 +74,9 @@ on:
         required: false
       FIREBASE:
         required: false
+      # Leitura dos runners da org para a sonda (opcional — sem ele, ubuntu-latest)
+      RUNNERS_READ_TOKEN:
+        required: false
 
 concurrency:
   group: pipeline-unica-${{ github.workflow }}-${{ github.ref }}
@@ -81,8 +84,70 @@ concurrency:
 
 
 jobs:
-  build_and_deploy:
+  # Sonda de runner: o Mac mini (runners self-hosted da org, label macOS) está
+  # online e livre? Ocupado -> GitHub na hora; offline -> espera até 2 min e
+  # então GitHub (ubuntu-latest).
+  #
+  # Lê o secret RUNNERS_READ_TOKEN (PAT fine-grained, permissão de org
+  # "Self-hosted runners: Read-only" em my-build-ead), repassado pelo caller
+  # junto com os FIREBASE_*. Sem o secret (ou vencido) a sonda não enxerga o
+  # mini e TODO deploy vai pro GitHub por segurança. O GITHUB_TOKEN não lista
+  # runners da org.
+  probe:
     runs-on: ubuntu-latest
+    permissions: {}
+    outputs:
+      runs_on: ${{ steps.pick.outputs.runs_on }}
+    steps:
+      - id: pick
+        env:
+          GH_TOKEN: ${{ secrets.RUNNERS_READ_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::Secret RUNNERS_READ_TOKEN ausente — deploy no runner do GitHub."
+            echo 'runs_on=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Três estados dos runners macOS da org:
+          #   idle    -> alguma instância online e livre: deploy no mini.
+          #   busy    -> todas online mas ocupadas: fallback IMEDIATO pro GitHub.
+          #              Esperar na fila do mini atrasaria mais do que o GitHub;
+          #              e a sonda parada custa minuto cobrado.
+          #   offline -> nenhuma online (mini desligado/reiniciando): espera até
+          #              2 min ele aparecer; senão fallback.
+          for i in $(seq 1 8); do  # 8 x 15s = 2 min (só no caso offline)
+            STATE=$(gh api orgs/my-build-ead/actions/runners --jq '
+              [.runners[] | select(any(.labels[].name; . == "macOS"))]
+              | if any(.[]; .status == "online" and .busy == false) then "idle"
+                elif any(.[]; .status == "online") then "busy"
+                else "offline" end' 2>/dev/null || echo error)
+            case "$STATE" in
+              idle)
+                echo 'runs_on=["self-hosted","macOS","ARM64"]' >> "$GITHUB_OUTPUT"
+                echo "Mac mini online e livre — deploy no self-hosted."
+                exit 0 ;;
+              busy)
+                echo 'runs_on=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
+                echo "Todas as instâncias do Mac mini ocupadas — deploy no runner do GitHub."
+                exit 0 ;;
+              error)
+                echo "::warning::Falha ao consultar os runners da org (token inválido/vencido?) — deploy no runner do GitHub."
+                echo 'runs_on=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
+                exit 0 ;;
+            esac
+            echo "Mac mini offline (tentativa $i/8)..."
+            sleep 15
+          done
+          echo 'runs_on=["ubuntu-latest"]' >> "$GITHUB_OUTPUT"
+          echo "Mac mini não respondeu em 2 min — fallback pro runner do GitHub."
+
+  build_and_deploy:
+    # Preferência: Mac mini self-hosted (mac03), com fallback automático pro
+    # GitHub via job `probe`. Os passos funcionam nos dois runners: o gcloud
+    # vem do setup-gcloud (tool cache do runner) e os scripts de limpeza são
+    # bash 3.2/BSD-compatíveis.
+    needs: probe
+    runs-on: ${{ fromJSON(needs.probe.outputs.runs_on) }}
     permissions:
       contents: read
       id-token: write
@@ -300,7 +365,10 @@ jobs:
 
       - name: Replace placeholder no src/index.ts
         run: |
-          sed -i "s/google_nome_funcao_replace_pipiline/${{ env.nomeDaFuncao }}/g" src/index.ts
+          # `-i.bak` funciona no GNU sed (ubuntu) e no BSD sed (macOS); o `-i`
+          # sem sufixo quebra no Mac mini.
+          sed -i.bak "s/google_nome_funcao_replace_pipiline/${{ env.nomeDaFuncao }}/g" src/index.ts
+          rm -f src/index.ts.bak
 
       - name: 'Deploy na function'
         run: |
@@ -368,3 +436,11 @@ jobs:
       # mantém as 3 mais novas, nunca a que serve tráfego.
       - name: 'Limpar revisões antigas do Cloud Run (mantém 3)'
         run: bash .mybuilder-deploy/scripts/cleanup-revisions.sh ${{ steps.env.outputs.project_id }} ${{ env.nomeDaFuncao }} us-central1 3
+
+      # O workspace do self-hosted persiste entre runs — não deixar env.yaml
+      # (secrets do Secret Manager) nem firebase.json (service account) parados
+      # em disco até o próximo checkout. (O gha-creds do google-github-actions/
+      # auth o próprio action remove no post-step.)
+      - name: Limpar arquivos sensíveis (self-hosted)
+        if: always() && runner.os == 'macOS'
+        run: rm -f ./env.yaml ./firebase.json
