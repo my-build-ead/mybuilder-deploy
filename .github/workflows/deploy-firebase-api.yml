@@ -380,6 +380,24 @@ jobs:
             fs.writeFileSync(".deploy/package.json", JSON.stringify(pkg, null, 2) + "\n");
           '
           (cd .deploy && npm install --package-lock-only --ignore-scripts --no-audit --no-fund)
+          # O npm 10 (Node 22) mantém no lock refeito os pacotes alcançados SÓ por
+          # peer opcional (marcados optional + peer) e o `npm ci` do buildpack os
+          # instala — a CLI do prisma voltava para a imagem por aí. O npm 11 já os
+          # descarta; este filtro deixa o lock igual nas duas versões.
+          node -e '
+            const fs = require("fs");
+            const file = ".deploy/package-lock.json";
+            const lock = JSON.parse(fs.readFileSync(file, "utf8"));
+            let removed = 0;
+            for (const [name, entry] of Object.entries(lock.packages)) {
+              if (entry.peer && entry.optional) {
+                delete lock.packages[name];
+                removed++;
+              }
+            }
+            fs.writeFileSync(file, JSON.stringify(lock, null, 2) + "\n");
+            console.log("lock de produção: " + (Object.keys(lock.packages).length - 1) + " pacotes (" + removed + " só de peer opcional removidos)");
+          '
           echo "Pacote de deploy: $(du -sh .deploy | cut -f1) em $(find .deploy -type f | wc -l | tr -d ' ') arquivos"
 
       - name: 'Deploy na function'
