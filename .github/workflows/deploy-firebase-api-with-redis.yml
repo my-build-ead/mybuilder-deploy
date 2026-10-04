@@ -53,6 +53,26 @@ on:
         required: false
         type: string
         default: ""
+      # Build no runner (opt-in). "true": o runner roda `npm ci` + `npm run build`
+      # e sobe só o compilado (dist/, package.json e package-lock.json só com as
+      # dependências de produção, e firebase.json). O buildpack do Cloud Build passa a fazer apenas a
+      # instalação de produção — sem instalar devDependencies, sem `tsc` e sem
+      # `npm prune` lá (eram ~140 s dos ~270 s do build). Requisitos da API:
+      # `main` apontando para dist/ e nada lido em runtime fora de dist/ além
+      # do firebase.json. "false" (padrão): o Cloud Build compila, como sempre.
+      prebuild:
+        required: false
+        type: string
+        default: "false"
+      # Reaplicar rede (Direct VPC) e Cloud SQL no serviço Cloud Run depois do
+      # deploy. "always" (padrão): sempre, criando uma 2ª revisão a cada deploy.
+      # "if-needed": só quando a revisão nova não está com a configuração
+      # desejada — a revisão do `functions deploy` herda essas anotações da
+      # anterior, então no caso comum o update é dispensado.
+      vpcUpdate:
+        required: false
+        type: string
+        default: "always"
     secrets:
       FIREBASE_DEV:
         required: false
@@ -319,6 +339,62 @@ jobs:
           sed -i.bak "s/google_nome_funcao_replace_pipiline/${{ env.nomeDaFuncao }}/g" src/index.ts
           rm -f src/index.ts.bak
 
+      - name: Setup Node (prebuild)
+        if: inputs.prebuild == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          # No mini o ~/.npm já persiste em disco; o cache remoto só somaria
+          # o tempo de restore/upload. No fallback (GitHub) ele liga.
+          cache: ${{ runner.os == 'Linux' && 'npm' || '' }}
+
+      - name: Build no runner e montar o pacote de deploy (prebuild)
+        if: inputs.prebuild == 'true'
+        run: |
+          set -euo pipefail
+          npm ci --no-audit --no-fund
+          npm run build
+          rm -rf .deploy
+          mkdir .deploy
+          cp -R dist .deploy/dist
+          cp package-lock.json firebase.json .deploy/
+          # package.json do pacote:
+          # - sem scripts: sem `build`/`gcp-build` o buildpack faz só a instalação
+          #   de produção, e sem `postinstall` ele não depende de ferramenta de
+          #   build na imagem;
+          # - sem devDependencies + lock refeito só com produção: `--omit=dev`
+          #   sozinho NÃO tira devDependency que também é peer opcional de uma
+          #   dependência de produção (o lock marca como devOptional) — era o
+          #   que mantinha a CLI do prisma e o typescript na imagem. O re-lock
+          #   parte do lock do repo, então as versões resolvidas não mudam.
+          node -e '
+            const fs = require("fs");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            pkg.scripts = {};
+            delete pkg.devDependencies;
+            fs.writeFileSync(".deploy/package.json", JSON.stringify(pkg, null, 2) + "\n");
+          '
+          (cd .deploy && npm install --package-lock-only --ignore-scripts --no-audit --no-fund)
+          # O npm 10 (Node 22) mantém no lock refeito os pacotes alcançados SÓ por
+          # peer opcional (marcados optional + peer) e o `npm ci` do buildpack os
+          # instala — a CLI do prisma voltava para a imagem por aí. O npm 11 já os
+          # descarta; este filtro deixa o lock igual nas duas versões.
+          node -e '
+            const fs = require("fs");
+            const file = ".deploy/package-lock.json";
+            const lock = JSON.parse(fs.readFileSync(file, "utf8"));
+            let removed = 0;
+            for (const [name, entry] of Object.entries(lock.packages)) {
+              if (entry.peer && entry.optional) {
+                delete lock.packages[name];
+                removed++;
+              }
+            }
+            fs.writeFileSync(file, JSON.stringify(lock, null, 2) + "\n");
+            console.log("lock de produção: " + (Object.keys(lock.packages).length - 1) + " pacotes (" + removed + " só de peer opcional removidos)");
+          '
+          echo "Pacote de deploy: $(du -sh .deploy | cut -f1) em $(find .deploy -type f | wc -l | tr -d ' ') arquivos"
+
       - name: 'Deploy na function'
         run: |
           EXTRA_FLAGS=""
@@ -339,6 +415,8 @@ jobs:
           fi
           EXTRA_FLAGS="$EXTRA_FLAGS --cpu=$CPU"
           if [ -n "${{ inputs.concurrency }}" ]; then EXTRA_FLAGS="$EXTRA_FLAGS --concurrency=${{ inputs.concurrency }}"; fi
+          # prebuild: sobe o pacote já compilado em vez do repositório
+          if [ "${{ inputs.prebuild }}" = "true" ]; then EXTRA_FLAGS="$EXTRA_FLAGS --source=.deploy"; fi
           gcloud functions deploy ${nomeDaFuncao} --gen2 --region=us-central1 --runtime nodejs22 --memory=1Gi --entry-point ${nomeDaFuncao} --trigger-http --allow-unauthenticated --env-vars-file env.yaml --project=${{ steps.env.outputs.project_id }} --min-instances=0 --max-instances=${{ inputs.maxInstances }} $EXTRA_FLAGS
 
       - name: "Aplicar x-internal-secret nos Cloud Scheduler jobs (opcional)"
@@ -363,8 +441,38 @@ jobs:
           done
 
       - name: 'Configurar Direct VPC Egress no Cloud Run subjacente'
+        env:
+          WANT_NET: ${{ steps.secret.outputs.NETWORK }}
+          WANT_SUB: ${{ steps.secret.outputs.SUBNET }}
+          WANT_SQL: ${{ steps.secret.outputs.DB_INSTANCE_CONNECTION_NAME }}
         run: |
           RUN_SERVICE=$(echo "${nomeDaFuncao}" | tr '_' '-')
+          if [ "${{ inputs.vpcUpdate }}" = "if-needed" ]; then
+            ann() {
+              gcloud run services describe "${RUN_SERVICE}" --region=us-central1 \
+                --project=${{ steps.env.outputs.project_id }} \
+                --format="value(spec.template.metadata.annotations.\"run.googleapis.com/$1\")" 2>/dev/null || true
+            }
+            NET_IF=$(ann network-interfaces)
+            CUR_NET=$(printf '%s' "$NET_IF" | sed -n 's/.*"network":"\([^"]*\)".*/\1/p')
+            CUR_SUB=$(printf '%s' "$NET_IF" | sed -n 's/.*"subnetwork":"\([^"]*\)".*/\1/p')
+            CUR_EGRESS=$(ann vpc-access-egress)
+            CUR_SQL=$(ann cloudsql-instances)
+            CUR_CONNECTOR=$(ann vpc-access-connector)
+            # Compara pelo último segmento: o secret pode trazer o nome curto ou
+            # o caminho completo (projects/.../networks/x). Qualquer diferença,
+            # ou falha na leitura, cai no update (comportamento de sempre).
+            SQL_OK=false
+            case ",${CUR_SQL}," in *",${WANT_SQL},"*) SQL_OK=true ;; esac
+            if [ -n "$CUR_NET" ] && [ "${CUR_NET##*/}" = "${WANT_NET##*/}" ] \
+              && [ -n "$CUR_SUB" ] && [ "${CUR_SUB##*/}" = "${WANT_SUB##*/}" ] \
+              && [ "$CUR_EGRESS" = "private-ranges-only" ] \
+              && [ -z "$CUR_CONNECTOR" ] && [ "$SQL_OK" = "true" ]; then
+              echo "Rede e Cloud SQL já estão configurados na revisão nova — update dispensado (sem 2ª revisão)."
+              exit 0
+            fi
+            echo "Rede/Cloud SQL diferentes do desejado na revisão nova — aplicando o update."
+          fi
           gcloud run services update "${RUN_SERVICE}" \
             --region=us-central1 \
             --project=${{ steps.env.outputs.project_id }} \
@@ -392,4 +500,4 @@ jobs:
       # auth o próprio action remove no post-step.)
       - name: Limpar arquivos sensíveis (self-hosted)
         if: always() && runner.os == 'macOS'
-        run: rm -f ./env.yaml ./firebase.json
+        run: rm -rf ./env.yaml ./firebase.json ./.deploy
