@@ -52,7 +52,9 @@ e workflows reutilizáveis de deploy num repositório próprio.
 2. Workflow de deploy compartilhado.
 3. Pacote compartilhado, e publicar a versão nova ANTES de tocar nas APIs
    (o lock da API só pode ser gerado com a versão já no registro; depois de
-   publicar, o registro pode levar 1–2 minutos para mostrar a versão).
+   publicar, o registro pode levar 1–2 minutos para mostrar a versão). A tag
+   de publicação tem que apontar para o commit que JÁ tem a versão nova no
+   `package.json` — commit primeiro, tag depois.
 4. API piloto, deploy em dev, medição.
 5. Demais APIs.
 
