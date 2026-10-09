@@ -164,6 +164,22 @@ jobs:
       projeto: ${{ inputs.projeto }}
 
     steps:
+      # Marca este job como ativo no Mac mini, para o passo final "Limpar _work
+      # do projeto" saber se há outro job deste repo rodando na máquina (em
+      # outra instância do runner). O marker fica fora do _work, em
+      # ~/.actions-runner-jobs/<owner>_<repo>/, compartilhado por todas as
+      # instâncias, e guarda o PID do Runner.Worker (pai dos steps) — é por ele
+      # que o passo final distingue job vivo de resto de job interrompido.
+      - name: Registrar job ativo no runner (self-hosted)
+        if: runner.os == 'macOS'
+        run: |
+          DIR="${HOME}/.actions-runner-jobs/$(printf '%s' "$GITHUB_REPOSITORY" | tr / _)"
+          mkdir -p "$DIR"
+          MARKER="$DIR/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${PPID}"
+          printf 'pid=%s\nrunner=%s\nref=%s\nstarted=%s\n' "$PPID" "$RUNNER_NAME" "$GITHUB_REF_NAME" "$(date +%s)" > "$MARKER"
+          echo "RUNNER_JOB_MARKER=$MARKER" >> "$GITHUB_ENV"
+          echo "Job registrado em $MARKER"
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -501,3 +517,90 @@ jobs:
       - name: Limpar arquivos sensíveis (self-hosted)
         if: always() && runner.os == 'macOS'
         run: rm -rf ./env.yaml ./firebase.json ./.deploy
+
+      # O workspace deste projeto no Mac mini (_work/<repo>: checkout,
+      # node_modules, dist, .mybuilder-deploy...) ficava em disco para sempre,
+      # um por projeto e por instância do runner — era o que lotava o HD.
+      # Apaga SÓ a pasta do próprio projeto (nunca _tool, _actions, _temp nem
+      # os outros repos) e só quando este é o último job do repo:
+      #   - nenhum outro job deste repo vivo nesta máquina (markers do passo
+      #     "Registrar job ativo"; marker de job morto é descartado);
+      #   - se o RUNNERS_READ_TOKEN tiver permissão "Actions: Read-only" nos
+      #     repos, nenhum outro run do repo queued/pending/in_progress na API
+      #     (dev, qa, sandbox e main disparados juntos: só o último limpa).
+      #     Sem essa permissão a API responde 403 e vale só a checagem local,
+      #     com aviso — nunca quebra o deploy.
+      # Roda com always(): run que falhou também libera o disco.
+      - name: Limpar _work do projeto no runner (self-hosted)
+        if: always() && runner.os == 'macOS'
+        env:
+          GH_TOKEN: ${{ secrets.RUNNERS_READ_TOKEN }}
+        run: |
+          # 1. este job deixa de contar como ativo
+          if [ -n "${RUNNER_JOB_MARKER:-}" ]; then rm -f "$RUNNER_JOB_MARKER"; fi
+
+          # 2. sanidade dos caminhos antes de qualquer rm: só _work/<repo>
+          REPO="${GITHUB_REPOSITORY##*/}"
+          case "$RUNNER_WORKSPACE" in
+            */_work/"$REPO") ;;
+            *) echo "::warning::RUNNER_WORKSPACE inesperado ($RUNNER_WORKSPACE) — limpeza do _work ignorada"; exit 0 ;;
+          esac
+          case "$GITHUB_WORKSPACE" in
+            "$RUNNER_WORKSPACE"/*) ;;
+            *) echo "::warning::GITHUB_WORKSPACE ($GITHUB_WORKSPACE) fora de $RUNNER_WORKSPACE — limpeza do _work ignorada"; exit 0 ;;
+          esac
+
+          # 3. outro job deste repo vivo nesta máquina (qualquer instância)?
+          DIR="${HOME}/.actions-runner-jobs/$(printf '%s' "$GITHUB_REPOSITORY" | tr / _)"
+          LIVE=0
+          for M in "$DIR"/*; do
+            [ -f "$M" ] || continue
+            PID=$(sed -n 's/^pid=//p' "$M")
+            RUNNER=$(sed -n 's/^runner=//p' "$M")
+            if [ "$RUNNER" = "$RUNNER_NAME" ]; then
+              # esta instância roda um job por vez: é resto de job interrompido
+              rm -f "$M"
+            elif [ -n "$PID" ] && ps -o command= -p "$PID" 2>/dev/null | grep -q 'Runner.Worker'; then
+              echo "Job ativo deste repo: $(basename "$M") (runner $RUNNER, pid $PID)"
+              LIVE=$((LIVE + 1))
+            else
+              rm -f "$M"  # job que não encerrou direito (reboot/kill)
+            fi
+          done
+          if [ "$LIVE" -gt 0 ]; then
+            echo "$LIVE outro(s) job(s) de $GITHUB_REPOSITORY rodando nesta máquina — a limpeza fica para o último."
+            exit 0
+          fi
+
+          # 4. outro run deste repo na fila/em andamento (dev, qa, sandbox, main)?
+          if [ -n "${GH_TOKEN:-}" ]; then
+            OTHERS=0
+            API_OK=true
+            for ST in queued pending in_progress; do
+              BODY=$(curl -sS -m 20 -w '\n%{http_code}' \
+                -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" \
+                "${GITHUB_API_URL:-https://api.github.com}/repos/$GITHUB_REPOSITORY/actions/runs?status=$ST&per_page=1") || { API_OK=false; break; }
+              CODE=$(printf '%s' "$BODY" | tail -n 1)
+              if [ "$CODE" != "200" ]; then echo "HTTP $CODE ao listar runs ($ST)"; API_OK=false; break; fi
+              N=$(printf '%s' "$BODY" | sed -n 's/.*"total_count": *\([0-9][0-9]*\).*/\1/p' | head -n 1)
+              if [ -z "$N" ]; then API_OK=false; break; fi
+              if [ "$ST" = "in_progress" ]; then N=$((N - 1)); fi  # desconta este run
+              if [ "$N" -gt 0 ]; then OTHERS=$((OTHERS + N)); fi
+            done
+            if [ "$API_OK" = "false" ]; then
+              echo "::warning::Sem leitura dos runs de $GITHUB_REPOSITORY (o RUNNERS_READ_TOKEN precisa de 'Actions: Read-only' nos repos) — considerando só os jobs desta máquina."
+            elif [ "$OTHERS" -gt 0 ]; then
+              echo "$OTHERS outro(s) run(s) de $GITHUB_REPOSITORY na fila/em andamento — a limpeza fica para o último."
+              exit 0
+            fi
+          else
+            echo "RUNNERS_READ_TOKEN ausente — considerando só os jobs desta máquina."
+          fi
+
+          # 5. último job do repo: apaga _work/<repo> e recria o workspace vazio
+          #    (o runner e o checkout esperam a pasta no próximo run)
+          SIZE=$(du -sh "$RUNNER_WORKSPACE" 2>/dev/null | cut -f1)
+          cd "${RUNNER_TEMP:-/tmp}"
+          rm -rf "$RUNNER_WORKSPACE"
+          mkdir -p "$GITHUB_WORKSPACE"
+          echo "Apagado $RUNNER_WORKSPACE (${SIZE:-?} liberados)."

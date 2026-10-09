@@ -70,4 +70,17 @@ Requisitos:
 - os scripts em `scripts/` são bash 3.2/BSD-compatíveis (macOS); o `sed -i`
   nos workflows usa sufixo `.bak` pelo mesmo motivo;
 - `env.yaml` e `firebase.json` são apagados ao final no self-hosted, já que o
-  workspace persiste entre runs.
+  workspace persiste entre runs;
+- o `_work/<repo>` do projeto (checkout, `node_modules`, `dist`,
+  `.mybuilder-deploy`) é apagado ao final do job no mini — só a pasta do
+  próprio projeto, nunca `_tool`, `_actions`, `_temp` nem os outros repos — e
+  só quando ele é o **último** job do repo: o primeiro step registra o job em
+  `~/.actions-runner-jobs/<owner>_<repo>/` (fora do `_work`, visível a todas
+  as instâncias do runner da máquina) e o último step só limpa se não houver
+  outro job do repo vivo ali nem, via API, outro run do repo
+  queued/pending/in_progress (dev, qa, sandbox e main disparados juntos: só o
+  último limpa). A consulta à API usa o `RUNNERS_READ_TOKEN` e precisa que o
+  PAT tenha também a permissão de repositório **Actions: Read-only** nos repos
+  da org; sem ela a API devolve 403, o step avisa e decide só pelos jobs da
+  máquina (nunca quebra o deploy). Roda com `always()`, então run que falhou
+  também libera o disco.
