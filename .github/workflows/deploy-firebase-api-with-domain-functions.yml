@@ -28,6 +28,13 @@ on:
         type: string
         # piso de 1 vCPU aplicado no step de deploy; valores maiores passam
         default: "1"
+      # Memoria da function (mesmo input do deploy-firebase-api.yml). Opcional:
+      # quem nao informa continua em 1Gi, como sempre foi aqui. Motivou: o
+      # v2_payments estourou 1 GiB no webhook do Pagar.me em producao (11/10/2026).
+      memory:
+        required: false
+        type: string
+        default: "1Gi"
       concurrency:
         required: false
         type: string
@@ -484,7 +491,7 @@ jobs:
           if [ -n "${{ inputs.concurrency }}" ]; then EXTRA_FLAGS="$EXTRA_FLAGS --concurrency=${{ inputs.concurrency }}"; fi
           # prebuild: sobe o pacote já compilado em vez do repositório
           if [ "${{ inputs.prebuild }}" = "true" ]; then EXTRA_FLAGS="$EXTRA_FLAGS --source=.deploy"; fi
-          gcloud functions deploy ${nomeDaFuncao} --gen2 --region=us-central1 --runtime nodejs22 --memory=1Gi --entry-point ${nomeDaFuncao} --trigger-http --allow-unauthenticated --env-vars-file env.yaml --project=${{ steps.env.outputs.project_id }} --min-instances=0 --max-instances=${{ inputs.maxInstances }} $EXTRA_FLAGS
+          gcloud functions deploy ${nomeDaFuncao} --gen2 --region=us-central1 --runtime nodejs22 --memory=${{ inputs.memory }} --entry-point ${nomeDaFuncao} --trigger-http --allow-unauthenticated --env-vars-file env.yaml --project=${{ steps.env.outputs.project_id }} --min-instances=0 --max-instances=${{ inputs.maxInstances }} $EXTRA_FLAGS
 
       - name: "Aplicar x-internal-secret nos Cloud Scheduler jobs (opcional)"
         if: inputs.schedulerJobs != ''
